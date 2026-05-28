@@ -108,6 +108,18 @@ const extraOrigins = unique([
 // are always present regardless of env var configuration
 const allowedOrigins = unique([...defaultDevOrigins, ...extraOrigins]);
 
+// Hosts allowed to make requests without an Origin header (e.g., curl, server-to-server).
+// Defaults to local development hosts. Comma-separated, host:port format.
+// Uses the configured PORT so no-origin access works on any port the server binds to.
+const noOriginAllowedHosts = unique([
+  ...[
+    `localhost:${PORT}`,
+    `127.0.0.1:${PORT}`,
+    `[::1]:${PORT}`,
+    ...(process.env.CORS_NO_ORIGIN_HOSTS || '').split(','),
+  ].map((h) => h.trim()),
+]);
+
 // FIX 4: Log on startup so you can verify in any environment
 logger.info('[CORS] Allowed origins: ' + allowedOrigins.join(', '));
 
@@ -215,16 +227,40 @@ app.post(
 // ──────────────────────────────────────────────
 // CORS
 // ──────────────────────────────────────────────
+
+// Pre-CORS guard: reject missing Origin headers from untrusted hosts.
+// Without this, any device on the local network can bypass CORS when
+// the dev server is exposed with --host. The cors middleware's origin
+// callback does not have access to the request object, so we handle
+// the no-Origin case here.
+app.use((req, res, next) => {
+  if (req.headers.origin) {
+    return next();
+  }
+
+  const host = req.get('host') || '';
+
+  if (noOriginAllowedHosts.includes(host)) {
+    return next();
+  }
+
+  logger.warn(`[CORS] Rejected request without Origin header from host: ${host}`);
+  return res.status(403).json({ error: 'Not allowed by CORS' });
+});
+
 app.use(
   cors({
     origin(origin, callback) {
-      // Allow no-Origin header only in dev (curl / server-to-server testing).
-      // In production every request must come from an explicitly allowed origin.
-      if ((!origin && !isProd) || allowedOrigins.includes(origin)) {
+      if (allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
 
-      // FIX 5: Log blocked origins to help debug future CORS issues
+      // Requests without Origin are already handled by the pre-CORS guard above.
+      // If we reach here without an Origin, the host was trusted so we allow it.
+      if (!origin) {
+        return callback(null, false);
+      }
+
       logger.warn(`[CORS] Blocked origin: ${origin}`);
 
       const corsError = new Error('Not allowed by CORS');
